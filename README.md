@@ -11,14 +11,8 @@ poetry install --no-root
 ```
 
 ## Usage
-Create a `.env` file with
 
-```bash
-OPENAI_API_KEY=your-api-key  # or pass the API key in the request
-OPENAI_BASE_URL=http://localhost:8000/api/providers/openai/v1
-```
-
-and run
+To serve the FastAPI wrapper, run
 
 ```bash
 poetry run .venv/bin/uvicorn main:app --reload
