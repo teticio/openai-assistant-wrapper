@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "openai-assistant-wrapper"
+version = "0.1.0"
+description = ""
+authors = ["Robert Dargavel Smith <teticio@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "^0.115.8"
+python-dotenv = "^1.0.1"
+openai = "^1.61.1"
+ipykernel = "^6.29.5"
+uvicorn = "^0.34.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
