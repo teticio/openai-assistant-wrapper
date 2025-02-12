@@ -45,10 +45,10 @@ async def chat_completions(
         HTTPException: If an error occurs during processing the request.
     """
     try:
-        client = openai.OpenAI()
+        api_key = None
         if authorization.startswith("Bearer "):
             api_key = authorization[len("Bearer ") :].strip()
-            client.api_key = api_key
+        client = openai.OpenAI(api_key=api_key)
 
         if "stream" in request and request["stream"]:
             return await chat_completions_streaming(client, request)
