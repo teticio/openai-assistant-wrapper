@@ -250,8 +250,8 @@ def get_references(client: OpenAI, message: Message) -> str:
         if file_citation := getattr(annotation, "file_citation", None):
             citations[annotation.text] = client.files.retrieve(file_citation.file_id)
 
-    references = "/n".join(
-        f"{citation}: {file.filename}" for citation, file in citations.items()
+    references = "\n".join(
+        f"- {citation}: {file.filename}" for citation, file in citations.items()
     )
     if references:
         references = f"\n\n**References**:\n{references}"
