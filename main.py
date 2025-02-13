@@ -1,9 +1,11 @@
 import logging
+import os
 import time
 from typing import AsyncGenerator
 
-import openai
 from fastapi import FastAPI, Header, HTTPException, Response
+from openai import OpenAI
+from openai.types.beta.threads.message import Message
 from openai.types.beta.assistant_stream_event import (
     ThreadMessageCompleted,
     ThreadMessageDelta,
@@ -48,7 +50,7 @@ async def chat_completions(
         api_key = None
         if authorization.startswith("Bearer "):
             api_key = authorization[len("Bearer ") :].strip()
-        client = openai.OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key)
 
         if "stream" in request and request["stream"]:
             return await chat_completions_streaming(client, request)
@@ -64,7 +66,7 @@ async def chat_completions(
 
 
 async def chat_completions_streaming(
-    client: openai.OpenAI,
+    client: OpenAI,
     request: CompletionCreateParamsStreaming,
 ) -> StreamingResponse:
     """
@@ -126,9 +128,15 @@ async def chat_completions_streaming(
                     ).encode("utf-8")
 
                 elif isinstance(event, ThreadMessageCompleted):
+                    message = next(
+                        iter(client.beta.threads.messages.list(thread_id=thread.id))
+                    )
+                    references = get_references(client, message)
                     choices = [
                         ChunkChoice(
-                            delta=ChoiceDelta(content=""), index=0, finish_reason="stop"
+                            delta=ChoiceDelta(content=references),
+                            index=0,
+                            finish_reason="stop",
                         )
                     ]
                     yield (
@@ -154,7 +162,7 @@ async def chat_completions_streaming(
 
 
 async def chat_completions_non_streaming(
-    client: openai.OpenAI,
+    client: OpenAI,
     request: CompletionCreateParamsNonStreaming,
 ) -> Response:
     """
@@ -185,13 +193,16 @@ async def chat_completions_non_streaming(
             assistant_id=request["model"],
         )
         assert run.status == "completed"
-        message = next(iter(client.beta.threads.messages.list(thread_id=thread.id)))
 
+        message = next(iter(client.beta.threads.messages.list(thread_id=thread.id)))
+        references = get_references(client, message)
         choices = [
             Choice(
                 index=index,
                 finish_reason="stop",
-                message=ChatCompletionMessage(content=choice.text.value, role="assistant"),
+                message=ChatCompletionMessage(
+                    content=choice.text.value + references, role="assistant"
+                ),
             )
             for index, choice in enumerate(message.content)
         ]
@@ -213,3 +224,35 @@ async def chat_completions_non_streaming(
     except Exception as e:
         logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def get_references(client: OpenAI, message: Message) -> str:
+    """
+    Add references based on citations from a thread.
+
+    Args:
+        client: An instance of the OpenAI client.
+        thread_id: The ID of the thread to retrieve references from.
+
+    Returns:
+        str: A string containing the references for the thread.
+    """
+    if os.getenv("DO_NOT_USE_REFERENCES"):
+        return ""
+
+    citations = {}
+    annotations = [
+        annotation 
+        for content in message.content 
+        for annotation in content.text.annotations
+    ]
+    for annotation in annotations:
+        if file_citation := getattr(annotation, "file_citation", None):
+            citations[annotation.text] = client.files.retrieve(file_citation.file_id)
+
+    references = "/n".join(
+        f"{citation}: {file.filename}" for citation, file in citations.items()
+    )
+    if references:
+        references = f"\n\n**References**:\n{references}"
+    return references

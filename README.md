@@ -19,3 +19,5 @@ poetry run .venv/bin/uvicorn main:app --reload
 ```
 
 In the API call, provide your Assistant ID (e.g., `asst_1234567890abcdef01234567`) as the `model`. The [`test.ipynb`](notebooks/test.ipynb) notebook gives some examples of how to use the wrapper.
+
+Unless you set the enivironment variable `DO_NOT_USE_REFERENCES`, references to files used in the generation will be appended to the generated text.
