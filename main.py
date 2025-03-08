@@ -1,10 +1,14 @@
+import base64
+import io
 import logging
 import os
 import time
-from typing import AsyncGenerator
+import uuid
+from typing import AsyncGenerator, Iterable
 
 from fastapi import FastAPI, Header, HTTPException, Response
-from openai import OpenAI
+from openai import AsyncOpenAI
+from openai.types.beta.thread import Thread
 from openai.types.beta.threads.message import Message
 from openai.types.beta.assistant_stream_event import (
     ThreadMessageCompleted,
@@ -14,6 +18,7 @@ from openai.types.chat import ChatCompletionChunk
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from openai.types.chat.completion_create_params import (
     CompletionCreateParams,
     CompletionCreateParamsNonStreaming,
@@ -26,6 +31,89 @@ app = FastAPI()
 logger = logging.getLogger(__name__)
 
 
+async def create_messages(
+    client: AsyncOpenAI, thread: Thread, messages: Iterable[ChatCompletionMessageParam]
+) -> None:
+    """
+    Process a list of chat messages and create them in a specified thread.
+
+    This function iterates over a collection of chat messages, processes each message,
+    and creates it in the specified thread using the OpenAI client. If a message contains
+    an image URL in base64 format, it decodes the image, uploads it to the OpenAI service,
+    and replaces the URL with a file reference.
+
+    Args:
+        client (AsyncOpenAI): An instance of the AsyncOpenAI client used to interact with the API.
+        thread (Thread): The thread in which the messages will be created.
+        messages (Iterable[ChatCompletionMessageParam]): An iterable of message parameters
+            to be processed and created in the thread.
+
+    Returns:
+        None
+    """
+    for message in messages:
+        if message["role"] == "system":
+            continue
+
+        content = message["content"]
+        if not isinstance(message["content"], str):
+            content = list(content)
+            for i, content_item in enumerate(content):
+                if content_item["type"] == "image_url" and content_item["image_url"][
+                    "url"
+                ].startswith("data"):
+                    header, encoded = content_item["image_url"]["url"].split(",", 1)
+                    file_extension = header.split(";")[0].split("/")[-1]
+                    image_data = base64.b64decode(encoded)
+                    file_obj = io.BytesIO(image_data)
+                    file_obj.name = f"{uuid.uuid4()}.{file_extension}"
+                    file = await client.files.create(file=file_obj, purpose="vision")
+                    content[i] = {
+                        "type": "image_file",
+                        "image_file": {"file_id": file.id},
+                    }
+
+        await client.beta.threads.messages.create(
+            thread_id=thread.id,
+            role=message["role"],
+            content=content,
+        )
+
+
+async def get_references(client: AsyncOpenAI, message: Message) -> str:
+    """
+    Add references based on citations from a thread.
+
+    Args:
+        client (AsyncOpenAI): An instance of the AsyncOpenAI client.
+        message (Message): The message object containing content and annotations.
+
+    Returns:
+        str: A string containing the references for the thread.
+    """
+    if os.getenv("DO_NOT_USE_REFERENCES"):
+        return ""
+
+    citations = {}
+    annotations = [
+        annotation
+        for content in message.content
+        for annotation in content.text.annotations
+    ]
+    for annotation in annotations:
+        if file_citation := getattr(annotation, "file_citation", None):
+            citations[annotation.text] = await client.files.retrieve(
+                file_citation.file_id
+            )
+
+    references = "\n".join(
+        f"- {citation}: {file.filename}" for citation, file in citations.items()
+    )
+    if references:
+        references = f"\n\n**References**:\n{references}"
+    return references
+
+
 @app.post(
     "/api/providers/openai/v1/chat/completions",
     response_model=bytes | ChatCompletion,
@@ -34,10 +122,10 @@ async def chat_completions(
     request: CompletionCreateParams, authorization: str = Header(...)
 ) -> StreamingResponse | Response:
     """
-    Endpoint for creating a chat completion stream using OpenAI's API.
+    Create a chat completion stream using OpenAI's API.
 
     Args:
-        request (CompletionCreateParamsStreaming): Parameters for creating a streaming chat completion.
+        request (CompletionCreateParams): Parameters for creating a chat completion.
         authorization (str): Bearer token for authorizing the API request.
 
     Returns:
@@ -50,7 +138,7 @@ async def chat_completions(
         api_key = None
         if authorization.startswith("Bearer "):
             api_key = authorization[len("Bearer ") :].strip()
-        client = OpenAI(api_key=api_key)
+        client = AsyncOpenAI(api_key=api_key)
 
         if "stream" in request and request["stream"]:
             return await chat_completions_streaming(client, request)
@@ -66,13 +154,14 @@ async def chat_completions(
 
 
 async def chat_completions_streaming(
-    client: OpenAI,
+    client: AsyncOpenAI,
     request: CompletionCreateParamsStreaming,
 ) -> StreamingResponse:
     """
-    Endpoint for creating a chat completion stream using OpenAI's API.
+    Create a chat completion stream using OpenAI's API.
 
     Args:
+        client (AsyncOpenAI): An instance of the AsyncOpenAI client.
         request (CompletionCreateParamsStreaming): Parameters for creating a streaming chat completion.
 
     Returns:
@@ -82,17 +171,10 @@ async def chat_completions_streaming(
         HTTPException: If an error occurs during processing the request.
     """
     try:
-        thread = client.beta.threads.create()
-        for message in request["messages"]:
-            if message["role"] != "system":
-                client.beta.threads.messages.create(
-                    thread_id=thread.id,
-                    role=message["role"],
-                    content=message["content"],
-                )
-
+        thread = await client.beta.threads.create()
+        await create_messages(client, thread, request["messages"])
         created = int(time.time())
-        stream = client.beta.threads.runs.create(
+        stream = await client.beta.threads.runs.create(
             thread_id=thread.id,
             assistant_id=request["model"],
             stream=True,
@@ -100,12 +182,12 @@ async def chat_completions_streaming(
 
         async def event_generator() -> AsyncGenerator[bytes, None]:
             """
-            Asynchronous generator that yields event data from the OpenAI stream.
+            Asynchronously generate event data from the OpenAI stream.
 
             Yields:
                 bytes: JSON-formatted chat completion chunks encoded as bytes.
             """
-            for event in stream:
+            async for event in stream:
                 if isinstance(event, ThreadMessageDelta):
                     choices = [
                         ChunkChoice(
@@ -128,10 +210,11 @@ async def chat_completions_streaming(
                     ).encode("utf-8")
 
                 elif isinstance(event, ThreadMessageCompleted):
-                    message = next(
-                        iter(client.beta.threads.messages.list(thread_id=thread.id))
+                    messages = await client.beta.threads.messages.list(
+                        thread_id=thread.id
                     )
-                    references = get_references(client, message)
+                    message = await anext(aiter(messages))
+                    references = await get_references(client, message)
                     choices = [
                         ChunkChoice(
                             delta=ChoiceDelta(content=references),
@@ -162,40 +245,35 @@ async def chat_completions_streaming(
 
 
 async def chat_completions_non_streaming(
-    client: OpenAI,
+    client: AsyncOpenAI,
     request: CompletionCreateParamsNonStreaming,
 ) -> Response:
     """
-    Endpoint for creating a chat completion response using OpenAI's API.
+    Create a chat completion response using OpenAI's API.
 
     Args:
+        client (AsyncOpenAI): An instance of the AsyncOpenAI client.
         request (CompletionCreateParamsNonStreaming): Parameters for creating a non-streaming chat completion.
 
     Returns:
-        Response: a response containing the chat completion data.
+        Response: A response containing the chat completion data.
 
     Raises:
         HTTPException: If an error occurs during processing the request.
     """
     try:
-        thread = client.beta.threads.create()
-        for message in request["messages"]:
-            if message["role"] != "system":
-                client.beta.threads.messages.create(
-                    thread_id=thread.id,
-                    role=message["role"],
-                    content=message["content"],
-                )
-
+        thread = await client.beta.threads.create()
+        await create_messages(client, thread, request["messages"])
         created = int(time.time())
-        run = client.beta.threads.runs.create_and_poll(
+        run = await client.beta.threads.runs.create_and_poll(
             thread_id=thread.id,
             assistant_id=request["model"],
         )
         assert run.status == "completed"
 
-        message = next(iter(client.beta.threads.messages.list(thread_id=thread.id)))
-        references = get_references(client, message)
+        messages = await client.beta.threads.messages.list(thread_id=thread.id)
+        message = await anext(aiter(messages))
+        references = await get_references(client, message)
         choices = [
             Choice(
                 index=index,
@@ -224,35 +302,3 @@ async def chat_completions_non_streaming(
     except Exception as e:
         logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-def get_references(client: OpenAI, message: Message) -> str:
-    """
-    Add references based on citations from a thread.
-
-    Args:
-        client: An instance of the OpenAI client.
-        thread_id: The ID of the thread to retrieve references from.
-
-    Returns:
-        str: A string containing the references for the thread.
-    """
-    if os.getenv("DO_NOT_USE_REFERENCES"):
-        return ""
-
-    citations = {}
-    annotations = [
-        annotation 
-        for content in message.content 
-        for annotation in content.text.annotations
-    ]
-    for annotation in annotations:
-        if file_citation := getattr(annotation, "file_citation", None):
-            citations[annotation.text] = client.files.retrieve(file_citation.file_id)
-
-    references = "\n".join(
-        f"- {citation}: {file.filename}" for citation, file in citations.items()
-    )
-    if references:
-        references = f"\n\n**References**:\n{references}"
-    return references
