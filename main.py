@@ -215,9 +215,10 @@ async def chat_completions_streaming(
                     )
                     message = await anext(aiter(messages))
                     references = await get_references(client, message)
+                    disclaimer = os.getenv("DISCLAIMER", "")
                     choices = [
                         ChunkChoice(
-                            delta=ChoiceDelta(content=references),
+                            delta=ChoiceDelta(content=references + disclaimer),
                             index=0,
                             finish_reason="stop",
                         )
@@ -274,12 +275,14 @@ async def chat_completions_non_streaming(
         messages = await client.beta.threads.messages.list(thread_id=thread.id)
         message = await anext(aiter(messages))
         references = await get_references(client, message)
+        disclaimer = os.getenv("DISCLAIMER", "")
         choices = [
             Choice(
                 index=index,
                 finish_reason="stop",
                 message=ChatCompletionMessage(
-                    content=choice.text.value + references, role="assistant"
+                    content=choice.text.value + references + disclaimer,
+                    role="assistant",
                 ),
             )
             for index, choice in enumerate(message.content)
