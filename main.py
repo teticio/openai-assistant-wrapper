@@ -216,6 +216,10 @@ async def chat_completions_streaming(
                     message = await anext(aiter(messages))
                     references = await get_references(client, message)
                     disclaimer = os.getenv("DISCLAIMER", "")
+                    if any(
+                        disclaimer in content_item.text.value for content_item in message.content
+                    ):
+                        disclaimer = ""
                     choices = [
                         ChunkChoice(
                             delta=ChoiceDelta(content=references + disclaimer),
@@ -276,6 +280,10 @@ async def chat_completions_non_streaming(
         message = await anext(aiter(messages))
         references = await get_references(client, message)
         disclaimer = os.getenv("DISCLAIMER", "")
+        if any(
+            disclaimer in content_item.text.value for content_item in message.content
+        ):
+            disclaimer = ""
         choices = [
             Choice(
                 index=index,
